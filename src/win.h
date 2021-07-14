@@ -89,6 +89,15 @@ struct win {
 	/// Always false if `is_new` is true.
 	bool managed : 1;
 };
+
+struct win_geometry {
+	int16_t x;
+	int16_t y;
+	uint16_t width;
+	uint16_t height;
+	uint16_t border_width;
+};
+
 struct managed_win {
 	struct win base;
 	/// backend data attached to this window. Only available when
@@ -107,9 +116,10 @@ struct managed_win {
 	winstate_t state;
 	/// Window attributes.
 	xcb_get_window_attributes_reply_t a;
-	/// Reply of xcb_get_geometry, which returns the geometry of the window body,
-	/// excluding the window border.
-	xcb_get_geometry_reply_t g;
+	/// The geometry of the window body, excluding the window border region.
+	struct win_geometry g;
+	/// Updated geometry received in events
+	struct win_geometry pending_g;
 	/// Xinerama screen this window is on.
 	int xinerama_scr;
 	/// Window visual pict format
@@ -210,6 +220,7 @@ struct managed_win {
 
 	/// Radius of rounded window corners
 	int corner_radius;
+	float border_col[4];
 
 	// Fading-related members
 	/// Override value of window fade state. Set by D-Bus method calls.
@@ -243,6 +254,8 @@ struct managed_win {
 	/// The value of _COMPTON_SHADOW attribute of the window. Below 0 for
 	/// none.
 	long prop_shadow;
+	/// Do not paint shadow over this window.
+	bool clip_shadow_above;
 
 	// Dim-related members
 	/// Whether the window is to be dimmed.
@@ -260,6 +273,8 @@ struct managed_win {
 #ifdef CONFIG_OPENGL
 	/// Textures and FBO background blur use.
 	glx_blur_cache_t glx_blur_cache;
+	/// Background texture of the window
+	glx_texture_t *glx_texture_bg;
 #endif
 };
 

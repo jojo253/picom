@@ -42,11 +42,11 @@
  * @return a <code>winprop_t</code> structure containing the attribute
  *    and number of items. A blank one on failure.
  */
-winprop_t x_get_prop_with_offset(const session_t *ps, xcb_window_t w, xcb_atom_t atom,
+winprop_t x_get_prop_with_offset(xcb_connection_t *c, xcb_window_t w, xcb_atom_t atom,
                                  int offset, int length, xcb_atom_t rtype, int rformat) {
 	xcb_get_property_reply_t *r = xcb_get_property_reply(
-	    ps->c,
-	    xcb_get_property(ps->c, 0, w, atom, rtype, to_u32_checked(offset),
+	    c,
+	    xcb_get_property(c, 0, w, atom, rtype, to_u32_checked(offset),
 	                     to_u32_checked(length)),
 	    NULL);
 
@@ -69,15 +69,34 @@ winprop_t x_get_prop_with_offset(const session_t *ps, xcb_window_t w, xcb_atom_t
 	    .ptr = NULL, .nitems = 0, .type = XCB_GET_PROPERTY_TYPE_ANY, .format = 0};
 }
 
+/// Get the type, format and size in bytes of a window's specific attribute.
+winprop_info_t x_get_prop_info(xcb_connection_t *c, xcb_window_t w, xcb_atom_t atom) {
+	xcb_generic_error_t *e = NULL;
+	auto r = xcb_get_property_reply(
+	    c, xcb_get_property(c, 0, w, atom, XCB_ATOM_ANY, 0, 0), &e);
+	if (!r) {
+		log_debug_x_error(e, "Failed to get property info for window %#010x", w);
+		free(e);
+		return (winprop_info_t){
+		    .type = XCB_GET_PROPERTY_TYPE_ANY, .format = 0, .length = 0};
+	}
+
+	winprop_info_t winprop_info = {
+	    .type = r->type, .format = r->format, .length = r->bytes_after};
+	free(r);
+
+	return winprop_info;
+}
+
 /**
  * Get the value of a type-<code>xcb_window_t</code> property of a window.
  *
  * @return the value if successful, 0 otherwise
  */
-xcb_window_t wid_get_prop_window(session_t *ps, xcb_window_t wid, xcb_atom_t aprop) {
+xcb_window_t wid_get_prop_window(xcb_connection_t *c, xcb_window_t wid, xcb_atom_t aprop) {
 	// Get the attribute
 	xcb_window_t p = XCB_NONE;
-	winprop_t prop = x_get_prop(ps, wid, aprop, 1L, XCB_ATOM_WINDOW, 32);
+	winprop_t prop = x_get_prop(c, wid, aprop, 1L, XCB_ATOM_WINDOW, 32);
 
 	// Return it
 	if (prop.nitems) {
@@ -95,19 +114,10 @@ xcb_window_t wid_get_prop_window(session_t *ps, xcb_window_t wid, xcb_atom_t apr
 bool wid_get_text_prop(session_t *ps, xcb_window_t wid, xcb_atom_t prop, char ***pstrlst,
                        int *pnstr) {
 	assert(ps->server_grabbed);
-	xcb_generic_error_t *e = NULL;
-	auto r = xcb_get_property_reply(
-	    ps->c, xcb_get_property(ps->c, 0, wid, prop, XCB_ATOM_ANY, 0, 0), &e);
-	if (!r) {
-		log_debug_x_error(e, "Failed to get window property for %#010x", wid);
-		free(e);
-		return false;
-	}
-
-	auto type = r->type;
-	auto format = r->format;
-	auto length = r->bytes_after;
-	free(r);
+	auto prop_info = x_get_prop_info(ps->c, wid, prop);
+	auto type = prop_info.type;
+	auto format = prop_info.format;
+	auto length = prop_info.length;
 
 	if (type == XCB_ATOM_NONE) {
 		return false;
@@ -126,8 +136,10 @@ bool wid_get_text_prop(session_t *ps, xcb_window_t wid, xcb_atom_t prop, char **
 		return false;
 	}
 
-	r = xcb_get_property_reply(
-	    ps->c, xcb_get_property(ps->c, 0, wid, prop, type, 0, length), &e);
+	xcb_generic_error_t *e = NULL;
+	auto word_count = (length + 4 - 1) / 4;
+	auto r = xcb_get_property_reply(
+	    ps->c, xcb_get_property(ps->c, 0, wid, prop, type, 0, word_count), &e);
 	if (!r) {
 		log_debug_x_error(e, "Failed to get window property for %#010x", wid);
 		free(e);
@@ -411,9 +423,10 @@ void x_clear_picture_clip_region(xcb_connection_t *c, xcb_render_picture_t pict)
 	}
 }
 
-enum { XSyncBadCounter = 0,
-       XSyncBadAlarm = 1,
-       XSyncBadFence = 2,
+enum {
+	XSyncBadCounter = 0,
+	XSyncBadAlarm = 1,
+	XSyncBadFence = 2,
 };
 
 /**
@@ -577,13 +590,14 @@ static const char *background_props_str[] = {
     0,
 };
 
-xcb_pixmap_t x_get_root_back_pixmap(session_t *ps) {
+xcb_pixmap_t
+x_get_root_back_pixmap(xcb_connection_t *c, xcb_window_t root, struct atom *atoms) {
 	xcb_pixmap_t pixmap = XCB_NONE;
 
 	// Get the values of background attributes
 	for (int p = 0; background_props_str[p]; p++) {
-		xcb_atom_t prop_atom = get_atom(ps->atoms, background_props_str[p]);
-		winprop_t prop = x_get_prop(ps, ps->root, prop_atom, 1, XCB_ATOM_PIXMAP, 32);
+		xcb_atom_t prop_atom = get_atom(atoms, background_props_str[p]);
+		winprop_t prop = x_get_prop(c, root, prop_atom, 1, XCB_ATOM_PIXMAP, 32);
 		if (prop.nitems) {
 			pixmap = (xcb_pixmap_t)*prop.p32;
 			free_winprop(&prop);
@@ -595,9 +609,9 @@ xcb_pixmap_t x_get_root_back_pixmap(session_t *ps) {
 	return pixmap;
 }
 
-bool x_is_root_back_pixmap_atom(session_t *ps, xcb_atom_t atom) {
+bool x_is_root_back_pixmap_atom(struct atom *atoms, xcb_atom_t atom) {
 	for (int p = 0; background_props_str[p]; p++) {
-		xcb_atom_t prop_atom = get_atom(ps->atoms, background_props_str[p]);
+		xcb_atom_t prop_atom = get_atom(atoms, background_props_str[p]);
 		if (prop_atom == atom) {
 			return true;
 		}

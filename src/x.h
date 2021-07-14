@@ -16,6 +16,7 @@
 #include "region.h"
 
 typedef struct session session_t;
+struct atom;
 
 /// Structure representing Window property value.
 typedef struct winprop {
@@ -32,6 +33,12 @@ typedef struct winprop {
 
 	xcb_get_property_reply_t *r;
 } winprop_t;
+
+typedef struct winprop_info {
+	xcb_atom_t type;
+	uint8_t format;
+	uint32_t length;
+} winprop_info_t;
 
 struct xvisual_info {
 	/// Bit depth of the red component
@@ -118,16 +125,19 @@ static inline void x_sync(xcb_connection_t *c) {
  * @return a <code>winprop_t</code> structure containing the attribute
  *    and number of items. A blank one on failure.
  */
-winprop_t x_get_prop_with_offset(const session_t *ps, xcb_window_t w, xcb_atom_t atom,
+winprop_t x_get_prop_with_offset(xcb_connection_t *c, xcb_window_t w, xcb_atom_t atom,
                                  int offset, int length, xcb_atom_t rtype, int rformat);
 
 /**
  * Wrapper of wid_get_prop_adv().
  */
-static inline winprop_t x_get_prop(const session_t *ps, xcb_window_t wid, xcb_atom_t atom,
+static inline winprop_t x_get_prop(xcb_connection_t *c, xcb_window_t wid, xcb_atom_t atom,
                                    int length, xcb_atom_t rtype, int rformat) {
-	return x_get_prop_with_offset(ps, wid, atom, 0L, length, rtype, rformat);
+	return x_get_prop_with_offset(c, wid, atom, 0L, length, rtype, rformat);
 }
+
+/// Get the type, format and size in bytes of a window's specific attribute.
+winprop_info_t x_get_prop_info(xcb_connection_t *c, xcb_window_t w, xcb_atom_t atom);
 
 /// Discard all X events in queue or in flight. Should only be used when the server is
 /// grabbed
@@ -143,7 +153,7 @@ static inline void x_discard_events(xcb_connection_t *c) {
  *
  * @return the value if successful, 0 otherwise
  */
-xcb_window_t wid_get_prop_window(session_t *ps, xcb_window_t wid, xcb_atom_t aprop);
+xcb_window_t wid_get_prop_window(xcb_connection_t *c, xcb_window_t wid, xcb_atom_t aprop);
 
 /**
  * Get the value of a text property of a window.
@@ -238,12 +248,14 @@ static inline void free_winprop(winprop_t *pprop) {
 	pprop->r = NULL;
 	pprop->nitems = 0;
 }
+
 /// Get the back pixmap of the root window
-xcb_pixmap_t x_get_root_back_pixmap(session_t *ps);
+xcb_pixmap_t
+x_get_root_back_pixmap(xcb_connection_t *c, xcb_window_t root, struct atom *atoms);
 
 /// Return true if the atom refers to a property name that is used for the
 /// root window background pixmap
-bool x_is_root_back_pixmap_atom(session_t *ps, xcb_atom_t atom);
+bool x_is_root_back_pixmap_atom(struct atom *atoms, xcb_atom_t atom);
 
 bool x_fence_sync(xcb_connection_t *, xcb_sync_fence_t);
 

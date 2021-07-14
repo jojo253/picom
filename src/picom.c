@@ -205,11 +205,15 @@ static inline void get_screen_region(session_t *ps, region_t *res) {
 
 void add_damage(session_t *ps, const region_t *damage) {
 	// Ignore damage when screen isn't redirected
-	if (!ps->redirected)
+	if (!ps->redirected) {
 		return;
+	}
 
-	if (!damage)
+	if (!damage) {
 		return;
+	}
+	log_trace("Adding damage: ");
+	dump_region(damage);
 	pixman_region32_union(ps->damage, ps->damage, (region_t *)damage);
 }
 
@@ -259,6 +263,8 @@ static bool run_fade(session_t *ps, struct managed_win **_w, long steps) {
 	}
 
 	if (steps) {
+		log_trace("Window %#010x (%s) opacity was: %lf", w->base.id, w->name,
+		          w->opacity);
 		if (w->opacity < w->opacity_target) {
 			w->opacity = clamp(w->opacity + ps->o.fade_in_step * (double)steps,
 			                   0.0, w->opacity_target);
@@ -266,6 +272,7 @@ static bool run_fade(session_t *ps, struct managed_win **_w, long steps) {
 			w->opacity = clamp(w->opacity - ps->o.fade_out_step * (double)steps,
 			                   w->opacity_target, 1);
 		}
+		log_trace("... updated to: %lf", w->opacity);
 	}
 
 	// Note even if opacity == opacity_target here, we still want to run preprocess
@@ -291,6 +298,10 @@ void discard_ignore(session_t *ps, unsigned long sequence) {
 }
 
 static int should_ignore(session_t *ps, unsigned long sequence) {
+	if (ps == NULL) {
+		// Do not ignore errors until the session has been initialized
+		return false;
+	}
 	discard_ignore(ps, sequence);
 	return ps->ignore_head && ps->ignore_head->sequence == sequence;
 }
@@ -330,7 +341,8 @@ uint32_t determine_evmask(session_t *ps, xcb_window_t wid, win_evmode_t mode) {
  */
 void update_ewmh_active_win(session_t *ps) {
 	// Search for the window
-	xcb_window_t wid = wid_get_prop_window(ps, ps->root, ps->atoms->a_NET_ACTIVE_WINDOW);
+	xcb_window_t wid =
+	    wid_get_prop_window(ps->c, ps->root, ps->atoms->a_NET_ACTIVE_WINDOW);
 	auto w = find_win_all(ps, wid);
 
 	// Mark the window focused. No need to unfocus the previous one.
@@ -702,22 +714,43 @@ static struct managed_win *paint_preprocess(session_t *ps, bool *fade_running) {
 		// Give up if it's not damaged or invisible, or it's unmapped and its
 		// pixmap is gone (for example due to a ConfigureNotify), or when it's
 		// excluded
-		if (!w->ever_damaged || w->g.x + w->g.width < 1 ||
-		    w->g.y + w->g.height < 1 || w->g.x >= ps->root_width ||
-		    w->g.y >= ps->root_height || w->state == WSTATE_UNMAPPED ||
-		    ((double)w->opacity * MAX_ALPHA < 1 && !w->blur_background) ||
-		    w->paint_excluded) {
+		if (w->state == WSTATE_UNMAPPED ||
+		    unlikely(w->base.id == ps->debug_window ||
+		             w->client_win == ps->debug_window)) {
+			to_paint = false;
+		} else if (!w->ever_damaged && w->state != WSTATE_UNMAPPING &&
+		           w->state != WSTATE_DESTROYING) {
+			// Unmapping clears w->ever_damaged, but the fact that the window
+			// is fading out means it must have been damaged when it was still
+			// mapped (because unmap_win_start will skip fading if it wasn't),
+			// so we still need to paint it.
+			log_trace("Window %#010x (%s) will not be painted because it has "
+			          "not received any damages",
+			          w->base.id, w->name);
+			to_paint = false;
+		} else if (unlikely(w->g.x + w->g.width < 1 || w->g.y + w->g.height < 1 ||
+		                    w->g.x >= ps->root_width || w->g.y >= ps->root_height)) {
+			log_trace("Window %#010x (%s) will not be painted because it is "
+			          "positioned outside of the screen",
+			          w->base.id, w->name);
+			to_paint = false;
+		} else if (unlikely((double)w->opacity * MAX_ALPHA < 1 && !w->blur_background)) {
 			/* TODO(yshui) for consistency, even a window has 0 opacity, we
 			 * still probably need to blur its background, so to_paint
 			 * shouldn't be false for them. */
+			log_trace("Window %#010x (%s) will not be painted because it has "
+			          "0 opacity",
+			          w->base.id, w->name);
 			to_paint = false;
-		}
-
-		if (w->base.id == ps->debug_window || w->client_win == ps->debug_window) {
+		} else if (w->paint_excluded) {
+			log_trace("Window %#010x (%s) will not be painted because it is "
+			          "excluded from painting",
+			          w->base.id, w->name);
 			to_paint = false;
-		}
-
-		if ((w->flags & WIN_FLAGS_IMAGE_ERROR) != 0) {
+		} else if (unlikely((w->flags & WIN_FLAGS_IMAGE_ERROR) != 0)) {
+			log_trace("Window %#010x (%s) will not be painted because it has "
+			          "image errors",
+			          w->base.id, w->name);
 			to_paint = false;
 		}
 		// log_trace("%s %d %d %d", w->name, to_paint, w->opacity,
@@ -734,6 +767,8 @@ static struct managed_win *paint_preprocess(session_t *ps, bool *fade_running) {
 		if (!to_paint) {
 			goto skip_window;
 		}
+
+		log_trace("Window %#010x (%s) will be painted", w->base.id, w->name);
 
 		// Calculate shadow opacity
 		w->shadow_opacity = ps->o.shadow_opacity * w->opacity * ps->o.frame_opacity;
@@ -858,13 +893,13 @@ void root_damaged(session_t *ps) {
 		if (ps->root_image) {
 			ps->backend_data->ops->release_image(ps->backend_data, ps->root_image);
 		}
-		auto pixmap = x_get_root_back_pixmap(ps);
+		auto pixmap = x_get_root_back_pixmap(ps->c, ps->root, ps->atoms);
 		if (pixmap != XCB_NONE) {
 			ps->root_image = ps->backend_data->ops->bind_pixmap(
 			    ps->backend_data, pixmap, x_get_visual_info(ps->c, ps->vis), false);
-			ps->backend_data->ops->image_op(
-			    ps->backend_data, IMAGE_OP_RESIZE_TILE, ps->root_image, NULL,
-			    NULL, (int[]){ps->root_width, ps->root_height});
+			ps->backend_data->ops->set_image_property(
+			    ps->backend_data, IMAGE_PROPERTY_EFFECTIVE_SIZE,
+			    ps->root_image, (int[]){ps->root_width, ps->root_height});
 		}
 	}
 
@@ -876,8 +911,9 @@ void root_damaged(session_t *ps) {
  * Xlib error handler function.
  */
 static int xerror(Display attr_unused *dpy, XErrorEvent *ev) {
-	if (!should_ignore(ps_g, ev->serial))
+	if (!should_ignore(ps_g, ev->serial)) {
 		x_print_error(ev->serial, ev->request_code, ev->minor_code, ev->error_code);
+	}
 	return 0;
 }
 
@@ -885,8 +921,9 @@ static int xerror(Display attr_unused *dpy, XErrorEvent *ev) {
  * XCB error handler function.
  */
 void ev_xcb_error(session_t *ps, xcb_generic_error_t *err) {
-	if (!should_ignore(ps, err->sequence))
+	if (!should_ignore(ps, err->sequence)) {
 		x_print_error(err->sequence, err->major_code, err->minor_code, err->error_code);
+	}
 }
 
 /**
@@ -1356,7 +1393,6 @@ static void handle_new_windows(session_t *ps) {
 				// and created the damage handle. And there is no way for
 				// us to find out. So just blindly mark it damaged
 				mw->ever_damaged = true;
-				add_damage_from_win(ps, mw);
 			}
 		}
 	}
@@ -1883,6 +1919,7 @@ static session_t *session_init(int argc, char **argv, Display *dpy,
 	if (!(c2_list_postprocess(ps, ps->o.unredir_if_possible_blacklist) &&
 	      c2_list_postprocess(ps, ps->o.paint_blacklist) &&
 	      c2_list_postprocess(ps, ps->o.shadow_blacklist) &&
+	      c2_list_postprocess(ps, ps->o.shadow_clip_list) &&
 	      c2_list_postprocess(ps, ps->o.fade_blacklist) &&
 	      c2_list_postprocess(ps, ps->o.blur_background_blacklist) &&
 	      c2_list_postprocess(ps, ps->o.invert_color_list) &&
@@ -2258,6 +2295,7 @@ static void session_destroy(session_t *ps) {
 
 	// Free blacklists
 	free_wincondlst(&ps->o.shadow_blacklist);
+	free_wincondlst(&ps->o.shadow_clip_list);
 	free_wincondlst(&ps->o.fade_blacklist);
 	free_wincondlst(&ps->o.focus_blacklist);
 	free_wincondlst(&ps->o.invert_color_list);
